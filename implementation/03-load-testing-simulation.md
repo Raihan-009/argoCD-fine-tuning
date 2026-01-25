@@ -69,8 +69,9 @@ argocd-server-xxx                                  1/1     Running   0          
 ### 2.1 Open Metrics Port (Run in separate terminal)
 
 ```bash
-# Terminal 1: Port forward to controller metrics
-kubectl port-forward svc/argocd-metrics -n argocd 8082:8082
+# Terminal 1: Port forward directly to the application-controller pod
+# (The controller exposes metrics on port 8082)
+kubectl port-forward -n argocd argocd-application-controller-0 8082:8082
 ```
 
 Keep this terminal open during all tests.
@@ -87,6 +88,18 @@ curl -s localhost:8082/metrics | head -20
 # HELP argocd_app_info Information about application.
 # TYPE argocd_app_info gauge
 argocd_app_info{...} 1
+```
+
+**Troubleshooting:** If the above doesn't work, check available services/pods:
+```bash
+# List services
+kubectl get svc -n argocd
+
+# List pods
+kubectl get pods -n argocd
+
+# Alternative: port-forward using pod label
+kubectl port-forward -n argocd pod/$(kubectl get pod -n argocd -l app.kubernetes.io/name=argocd-application-controller -o jsonpath='{.items[0].metadata.name}') 8082:8082
 ```
 
 ### 2.3 Key Metrics Commands
