@@ -1,0 +1,354 @@
+# Argo CD Performance-Tuned Helm Values
+# ========================================
+# This values file addresses:
+# 1. Repo-server disk pressure (emptyDir with sizeLimit)
+# 2. Slow syncs during peak windows (increased parallelism)
+# 3. Failed syncs under load (proper resource allocation)
+# 4. Git fetch reliability (retry and timeout settings)
+#
+# Reference: docs/argocd-performance-concepts.md
+
+# =============================================================================
+# GLOBAL SETTINGS
+# =============================================================================
+global:
+  # Logging level (debug, info, warn, error)
+  logging:
+    level: info
+
+# =============================================================================
+# REPO-SERVER CONFIGURATION
+# =============================================================================
+# Handles: Git clone, manifest generation (Helm/Kustomize/Jsonnet)
+# Key tuning: Disk pressure fix, resource allocation, git reliability
+repoServer:
+  # ---------------------------------------------------------------------------
+  # REPLICA COUNT
+  # ---------------------------------------------------------------------------
+  replicas: 2  # HA for production workloads
+
+  # ---------------------------------------------------------------------------
+  # RESOURCE ALLOCATION
+  # ---------------------------------------------------------------------------
+  # Manifest generation is CPU and memory intensive
+  # Helm template rendering requires significant CPU
+  # Large charts need memory headroom
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: 2000m      # 2 cores for peak load
+      memory: 2Gi     # Headroom for large Helm charts
+
+  # ---------------------------------------------------------------------------
+  # VOLUME MOUNTS - DISK PRESSURE FIX
+  # ---------------------------------------------------------------------------
+  # Problem: Default /tmp uses node filesystem, can fill up and cause eviction
+  # Solution: EmptyDir with sizeLimit provides isolated, bounded storage
+  volumes:
+    - name: tmp
+      emptyDir:
+        sizeLimit: 4Gi    # Prevents disk exhaustion
+    - name: helm-working-dir
+      emptyDir:
+        sizeLimit: 2Gi    # Helm chart processing
+
+  volumeMounts:
+    - name: tmp
+      mountPath: /tmp
+    - name: helm-working-dir
+      mountPath: /helm-working-dir
+
+  # ---------------------------------------------------------------------------
+  # ENVIRONMENT VARIABLES - GIT RELIABILITY
+  # ---------------------------------------------------------------------------
+  env:
+    # Retry git operations on failure (rate limits, network blips)
+    - name: ARGOCD_GIT_ATTEMPTS_COUNT
+      value: "3"
+    # Timeout for git commands (default 90s may be too short)
+    - name: ARGOCD_EXEC_TIMEOUT
+      value: "180s"
+    # Parallelism for manifest generation
+    - name: ARGOCD_REPO_SERVER_PARALLELISM_LIMIT
+      value: "5"
+
+  # ---------------------------------------------------------------------------
+  # AUTOSCALING (disabled for Kind, enable for production)
+  # ---------------------------------------------------------------------------
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 5
+    targetCPUUtilizationPercentage: 80
+    targetMemoryUtilizationPercentage: 80
+
+  # ---------------------------------------------------------------------------
+  # METRICS
+  # ---------------------------------------------------------------------------
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: false  # Enable if Prometheus Operator is installed
+
+# =============================================================================
+# APPLICATION CONTROLLER CONFIGURATION
+# =============================================================================
+# Handles: Watching Application CRDs, sync operations, reconciliation
+# Key tuning: Parallelism, resource allocation
+controller:
+  # ---------------------------------------------------------------------------
+  # REPLICA COUNT
+  # ---------------------------------------------------------------------------
+  # Note: Only 1 controller can be active (leader election)
+  # Multiple replicas provide HA failover
+  replicas: 1
+
+  # ---------------------------------------------------------------------------
+  # RESOURCE ALLOCATION
+  # ---------------------------------------------------------------------------
+  # Controller holds app state in memory
+  # More apps = more memory needed
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: 2000m      # 2 cores for reconciliation loops
+      memory: 4Gi     # Large memory for many applications
+
+  # ---------------------------------------------------------------------------
+  # CONTROLLER ARGUMENTS - PARALLELISM TUNING
+  # ---------------------------------------------------------------------------
+  args:
+    # Number of concurrent status refresh operations
+    # Default: 20, increase for high app count
+    statusProcessors: "50"
+
+    # Number of concurrent sync operations
+    # Default: 10, increase for deployment bursts
+    operationProcessors: "30"
+
+    # Full reconciliation interval (seconds)
+    # Default: 180, adjust based on needs
+    appResyncPeriod: "180"
+
+    # Timeout for repo-server calls
+    # Increase for large manifests
+    repoServerTimeoutSeconds: "180"
+
+  # ---------------------------------------------------------------------------
+  # ENVIRONMENT VARIABLES
+  # ---------------------------------------------------------------------------
+  env:
+    # Increase k8s client QPS for high operation volume
+    - name: ARGOCD_K8S_CLIENT_QPS
+      value: "50"
+    - name: ARGOCD_K8S_CLIENT_BURST
+      value: "100"
+
+  # ---------------------------------------------------------------------------
+  # METRICS
+  # ---------------------------------------------------------------------------
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: false  # Enable if Prometheus Operator is installed
+
+# =============================================================================
+# ARGOCD SERVER CONFIGURATION
+# =============================================================================
+# Handles: Web UI, API (gRPC/REST), CLI access
+# Key tuning: Resource allocation (lighter workload than other components)
+server:
+  # ---------------------------------------------------------------------------
+  # REPLICA COUNT
+  # ---------------------------------------------------------------------------
+  replicas: 2  # HA for UI availability
+
+  # ---------------------------------------------------------------------------
+  # RESOURCE ALLOCATION
+  # ---------------------------------------------------------------------------
+  # Stateless API server, lighter workload
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: 1000m
+      memory: 512Mi
+
+  # ---------------------------------------------------------------------------
+  # SERVICE TYPE
+  # ---------------------------------------------------------------------------
+  service:
+    type: ClusterIP  # Use NodePort or LoadBalancer for external access
+
+  # ---------------------------------------------------------------------------
+  # INGRESS (disabled by default)
+  # ---------------------------------------------------------------------------
+  ingress:
+    enabled: false
+    # Uncomment and configure for ingress access
+    # hosts:
+    #   - argocd.local
+    # tls:
+    #   - secretName: argocd-tls
+    #     hosts:
+    #       - argocd.local
+
+  # ---------------------------------------------------------------------------
+  # AUTOSCALING
+  # ---------------------------------------------------------------------------
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 5
+    targetCPUUtilizationPercentage: 80
+
+  # ---------------------------------------------------------------------------
+  # METRICS
+  # ---------------------------------------------------------------------------
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: false
+
+# =============================================================================
+# REDIS CONFIGURATION
+# =============================================================================
+# Handles: Caching layer for Argo CD components
+redis:
+  # ---------------------------------------------------------------------------
+  # RESOURCE ALLOCATION
+  # ---------------------------------------------------------------------------
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+  # ---------------------------------------------------------------------------
+  # METRICS
+  # ---------------------------------------------------------------------------
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: false
+
+# =============================================================================
+# DEX SERVER CONFIGURATION
+# =============================================================================
+# Handles: SSO/OIDC authentication (optional)
+dex:
+  enabled: true
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+# =============================================================================
+# APPLICATIONSET CONTROLLER
+# =============================================================================
+applicationSet:
+  enabled: true
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# =============================================================================
+# NOTIFICATIONS CONTROLLER
+# =============================================================================
+notifications:
+  enabled: true
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+# =============================================================================
+# CONFIGMAP SETTINGS
+# =============================================================================
+configs:
+  cm:
+    # Timeout settings
+    timeout.reconciliation: "180s"
+    timeout.hard.reconciliation: "0"
+
+    # Resource tracking method
+    # "annotation" is safer but slower for large apps
+    # "label" is faster but has limitations
+    application.resourceTrackingMethod: annotation
+
+    # Exec timeout for all commands
+    exec.enabled: "true"
+
+  params:
+    # Server settings
+    server.insecure: "false"
+    server.disable.auth: "false"
+
+    # Controller settings (alternative to args)
+    # controller.status.processors: "50"
+    # controller.operation.processors: "30"
+
+    # Repo server settings
+    reposerver.parallelism.limit: "5"
+
+  # ---------------------------------------------------------------------------
+  # REPOSITORIES (add your repos here)
+  # ---------------------------------------------------------------------------
+  repositories: {}
+    # Example:
+    # my-repo:
+    #   url: https://github.com/myorg/myrepo
+    #   name: my-repo
+
+  # ---------------------------------------------------------------------------
+  # CREDENTIALS (add your credentials here)
+  # ---------------------------------------------------------------------------
+  credentialTemplates: {}
+    # Example:
+    # github-https:
+    #   url: https://github.com
+    #   username: my-username
+    #   password: my-token
+
+# =============================================================================
+# RBAC CONFIGURATION
+# =============================================================================
+configs:
+  rbac:
+    policy.default: role:readonly
+    policy.csv: |
+      g, admin, role:admin
+
+# =============================================================================
+# EXTRA OBJECTS (optional)
+# =============================================================================
+# Create additional Kubernetes objects
+extraObjects: []
+  # Example: Create a PodDisruptionBudget
+  # - apiVersion: policy/v1
+  #   kind: PodDisruptionBudget
+  #   metadata:
+  #     name: argocd-server-pdb
+  #   spec:
+  #     minAvailable: 1
+  #     selector:
+  #       matchLabels:
+  #         app.kubernetes.io/name: argocd-server
