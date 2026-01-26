@@ -66,9 +66,8 @@ repoServer:
     # Timeout for git commands (default 90s may be too short)
     - name: ARGOCD_EXEC_TIMEOUT
       value: "180s"
-    # Parallelism for manifest generation
-    - name: ARGOCD_REPO_SERVER_PARALLELISM_LIMIT
-      value: "5"
+    # Note: ARGOCD_REPO_SERVER_PARALLELISM_LIMIT is set by chart via
+    # repoServer.parallelismLimit parameter (default: 0 = unlimited)
 
   # ---------------------------------------------------------------------------
   # AUTOSCALING (disabled for Kind, enable for production)

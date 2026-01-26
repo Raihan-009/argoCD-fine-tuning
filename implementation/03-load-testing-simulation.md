@@ -31,7 +31,7 @@ kubectl port-forward -n argocd argocd-application-controller-0 8082:8082
 
 ### What to Do
 
-**Terminal 1:** Create 20 apps simultaneously
+**Terminal 1:** Create 20 apps simultaneously (each with unique namespace to avoid conflicts)
 ```bash
 for i in $(seq 1 20); do
   kubectl apply -f - <<EOF
@@ -48,14 +48,18 @@ spec:
     path: guestbook
   destination:
     server: https://kubernetes.default.svc
-    namespace: test-apps
+    namespace: test-app-ns-$i
   syncPolicy:
     automated:
       prune: true
       selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
 EOF
 done
 ```
+
+> **Note:** Each app deploys to its own namespace (`test-app-ns-1`, `test-app-ns-2`, etc.) to avoid resource conflicts. If all apps deploy to the same namespace, they'll fight over the same `guestbook-ui` resources and show `SharedResourceWarning`.
 
 **Terminal 2:** Watch sync progress (start immediately)
 ```bash
@@ -87,7 +91,14 @@ kubectl get statefulset argocd-application-controller -n argocd \
 ### Cleanup
 
 ```bash
+# Delete all test applications
 kubectl delete applications -n argocd --all
+
+# Delete test namespaces
+for i in $(seq 1 20); do
+  kubectl delete namespace test-app-ns-$i --ignore-not-found=true &
+done
+wait
 ```
 
 ---
@@ -297,6 +308,12 @@ requests: {"cpu":"500m","memory":"1Gi"}, limits: {"cpu":"2000m","memory":"4Gi"}
 ```bash
 # Delete test applications
 kubectl delete applications -n argocd --all
+
+# Delete test namespaces
+for i in $(seq 1 20); do
+  kubectl delete namespace test-app-ns-$i --ignore-not-found=true &
+done
+wait
 
 # (Optional) Uninstall Argo CD
 helm uninstall argocd -n argocd
