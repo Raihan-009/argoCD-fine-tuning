@@ -73,7 +73,11 @@ kubectl get deployment argocd-repo-server -n ${NAMESPACE} \
 echo ""
 echo ""
 
-# Check actual mount in pod
+# Wait for new pod to be ready, then check disk usage
+log_info "Waiting for new pod to be ready..."
+kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=argocd-repo-server -n ${NAMESPACE} --timeout=120s
+
+# Get the NEW pod name after rollout
 REPO_POD=$(kubectl get pod -n ${NAMESPACE} -l app.kubernetes.io/name=argocd-repo-server -o jsonpath='{.items[0].metadata.name}')
 log_info "Disk usage in new pod (${REPO_POD}):"
 kubectl exec -n ${NAMESPACE} ${REPO_POD} -- df -h /tmp
