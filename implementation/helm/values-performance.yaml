@@ -42,23 +42,19 @@ repoServer:
       memory: 2Gi     # Headroom for large Helm charts
 
   # ---------------------------------------------------------------------------
-  # VOLUME MOUNTS - DISK PRESSURE FIX
+  # DISK PRESSURE FIX - Apply via patch after install
   # ---------------------------------------------------------------------------
   # Problem: Default /tmp uses node filesystem, can fill up and cause eviction
   # Solution: EmptyDir with sizeLimit provides isolated, bounded storage
-  volumes:
-    - name: tmp
-      emptyDir:
-        sizeLimit: 4Gi    # Prevents disk exhaustion
-    - name: helm-working-dir
-      emptyDir:
-        sizeLimit: 2Gi    # Helm chart processing
-
-  volumeMounts:
-    - name: tmp
-      mountPath: /tmp
-    - name: helm-working-dir
-      mountPath: /helm-working-dir
+  #
+  # NOTE: The Helm chart doesn't support sizeLimit directly.
+  # Apply this fix AFTER installation using:
+  #
+  #   kubectl patch deployment argocd-repo-server -n argocd --type='json' -p='[
+  #     {"op": "replace", "path": "/spec/template/spec/volumes/0/emptyDir", "value": {"sizeLimit": "4Gi"}}
+  #   ]'
+  #
+  # Or see: implementation/scripts/apply-disk-pressure-fix.sh
 
   # ---------------------------------------------------------------------------
   # ENVIRONMENT VARIABLES - GIT RELIABILITY
@@ -121,22 +117,12 @@ controller:
   # ---------------------------------------------------------------------------
   # CONTROLLER ARGUMENTS - PARALLELISM TUNING
   # ---------------------------------------------------------------------------
-  args:
-    # Number of concurrent status refresh operations
-    # Default: 20, increase for high app count
-    statusProcessors: "50"
-
-    # Number of concurrent sync operations
-    # Default: 10, increase for deployment bursts
-    operationProcessors: "30"
-
-    # Full reconciliation interval (seconds)
-    # Default: 180, adjust based on needs
-    appResyncPeriod: "180"
-
-    # Timeout for repo-server calls
-    # Increase for large manifests
-    repoServerTimeoutSeconds: "180"
+  # Use extraArgs to pass command line arguments
+  extraArgs:
+    - --status-processors=50      # Default: 20, increase for high app count
+    - --operation-processors=30   # Default: 10, increase for deployment bursts
+    - --app-resync=180            # Full reconciliation interval (seconds)
+    - --repo-server-timeout-seconds=180  # Timeout for repo-server calls
 
   # ---------------------------------------------------------------------------
   # ENVIRONMENT VARIABLES
