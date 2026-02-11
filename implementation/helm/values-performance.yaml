@@ -42,19 +42,14 @@ repoServer:
       memory: 2Gi     # Headroom for large Helm charts
 
   # ---------------------------------------------------------------------------
-  # DISK PRESSURE FIX - Apply via patch after install
+  # DISK PRESSURE FIX (native since chart v8.5.0, PR #3281)
   # ---------------------------------------------------------------------------
   # Problem: Default /tmp uses node filesystem, can fill up and cause eviction
   # Solution: EmptyDir with sizeLimit provides isolated, bounded storage
-  #
-  # NOTE: The Helm chart doesn't support sizeLimit directly.
-  # Apply this fix AFTER installation using:
-  #
-  #   kubectl patch deployment argocd-repo-server -n argocd --type='json' -p='[
-  #     {"op": "replace", "path": "/spec/template/spec/volumes/0/emptyDir", "value": {"sizeLimit": "4Gi"}}
-  #   ]'
-  #
-  # Or see: implementation/scripts/apply-disk-pressure-fix.sh
+  # Applies sizeLimit to all repo-server emptyDir volumes:
+  #   /tmp, plugins, var-files, helm-working-dir
+  emptyDir:
+    sizeLimit: "4Gi"
 
   # ---------------------------------------------------------------------------
   # ENVIRONMENT VARIABLES - GIT RELIABILITY
@@ -112,6 +107,14 @@ controller:
     limits:
       cpu: 2000m      # 2 cores for reconciliation loops
       memory: 4Gi     # Large memory for many applications
+
+  # ---------------------------------------------------------------------------
+  # DISK PRESSURE FIX (native since chart v8.5.0, PR #3281)
+  # ---------------------------------------------------------------------------
+  # Prevents /dev/shm exhaustion when deploying concurrently to many clusters
+  # or processing large manifests
+  emptyDir:
+    sizeLimit: "4Gi"
 
   # ---------------------------------------------------------------------------
   # CONTROLLER ARGUMENTS - PARALLELISM TUNING
