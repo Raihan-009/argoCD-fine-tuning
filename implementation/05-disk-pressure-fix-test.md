@@ -281,29 +281,82 @@ Filesystem      Size  Used Avail Use% Mounted on
 
 **Why 100% used?** The partial 5GB write filled the volume up to its 4Gi cap and stopped. The volume is full but **bounded** - it cannot grow beyond 4Gi regardless of what runs inside the container.
 
-#### Verify Pod Survived
+#### Verify Pod Status After Test
 
 ```bash
 echo "=== Pod status AFTER test ==="
 kubectl get pod -n argocd $REPO_POD \
   -o custom-columns='NAME:.metadata.name,STATUS:.status.phase,RESTARTS:.status.containerStatuses[0].restartCount'
+
+echo ""
+echo "=== All repo-server pods ==="
+kubectl get pods -n argocd -l app.kubernetes.io/name=argocd-repo-server \
+  -o custom-columns='NAME:.metadata.name,STATUS:.status.phase,RESTARTS:.status.containerStatuses[0].restartCount'
 ```
 
-**Expected output:**
+#### Two Possible Outcomes (Both Are Correct)
+
+There is a race condition between the `dd` write and the kubelet's periodic ephemeral storage check (~10-15 second interval). Depending on timing, you will see one of two outcomes:
+
+**Outcome A: Pod Stays Running**
+
 ```
 NAME                                  STATUS    RESTARTS
-argocd-repo-server-xxxxxxxxxx-xxxxx   Running   0
+argocd-repo-server-xxxxxxxxxx-abc12   Running   0
 ```
 
-**Why still "Running" with 0 restarts?** This is the whole point of the fix:
-- The sizeLimit **prevented** the write from reaching the node filesystem
-- The kubelet saw no node-level disk pressure
-- No eviction was triggered
-- The repo-server process inside the container is still alive and serving
+This happens when `dd` hits the `ENOSPC` error and stops writing **before** the kubelet's next periodic check. The kubelet never sees a breach, so the pod stays alive. The volume is full but the pod is healthy.
 
-**Without sizeLimit**, the 5GB write would succeed, fill the node disk, kubelet would mark the node as `DiskPressure=True`, and start evicting pods. You'd see the repo-server pod disappear and a new one start (or worse, multiple pods across the node get evicted).
+**Outcome B: Pod Gets Evicted and Replaced (This Is Also Normal)**
+
+```
+NAME                                  STATUS    RESTARTS
+argocd-repo-server-xxxxxxxxxx-abc12   <not found or Evicted>
+argocd-repo-server-xxxxxxxxxx-xyz78   Running   0        ← new pod
+```
+
+This happens when the kubelet's periodic check runs **while** `dd` is still writing or right after the volume hits 100%. The kubelet detects the emptyDir breached its sizeLimit and evicts the pod. The Deployment controller immediately creates a replacement pod with a fresh, empty `/tmp`.
+
+**Why Outcome B is still the fix working correctly:**
+
+```
+                    What gets evicted?
+                    ┌──────────────────────────────────────────────┐
+                    │                                              │
+  WITH sizeLimit:   │  Only the 1 pod that breached its limit     │
+                    │  → Other repo-server replica keeps serving  │
+                    │  → New pod starts in seconds, clean /tmp    │
+                    │  → Zero downtime (replicas: 2)              │
+                    │                                              │
+                    ├──────────────────────────────────────────────┤
+                    │                                              │
+  WITHOUT           │  ALL pods on the node get evicted            │
+  sizeLimit:        │  → repo-server, controller, redis, server   │
+                    │  → Node marked DiskPressure=True             │
+                    │  → Potential cascade across workloads        │
+                    │  → Full outage until node recovers           │
+                    │                                              │
+                    └──────────────────────────────────────────────┘
+```
+
+The critical difference is **blast radius**: with sizeLimit, eviction is scoped to one pod that self-heals. Without it, the entire node is affected.
+
+If you see Outcome B, you can verify by checking events:
+
+```bash
+kubectl get events -n argocd --sort-by='.lastTimestamp' | grep -i "ephemeral\|evict"
+```
+
+You should see something like:
+```
+The node was low on resource: ephemeral-storage. Evicted pod argocd-repo-server-xxx.
+```
+
+This confirms the eviction was triggered by the **pod-level emptyDir limit**, NOT by node-level disk pressure.
 
 ### 6.2 Clean Up Test File
+
+If your pod survived (Outcome A), clean up the test file:
 
 ```bash
 kubectl exec -n argocd $REPO_POD -- rm -f /tmp/testfile
@@ -317,6 +370,8 @@ kubectl exec -n argocd $REPO_POD -- df -h /tmp
 ```
 
 **Expected:** Back to ~0% used.
+
+If your pod was replaced (Outcome B), no cleanup is needed - the new pod started with a fresh, empty `/tmp`. This is the self-healing behavior of emptyDir.
 
 ### 6.3 Controller Disk Test
 
@@ -353,7 +408,7 @@ kubectl get pod -n argocd $CTRL_POD \
   -o custom-columns='NAME:.metadata.name,STATUS:.status.phase,RESTARTS:.status.containerStatuses[0].restartCount'
 ```
 
-**Expected:** Same behavior as repo-server - write fails at ~4Gi, pod stays Running with 0 restarts.
+**Expected:** Same two possible outcomes as repo-server - either pod stays Running or gets evicted and replaced. Both are correct. The key is that only the controller pod is affected, not the entire node.
 
 ```bash
 # Clean up
@@ -467,10 +522,11 @@ kubectl -n argocd get secret argocd-initial-admin-secret \
 | Controller emptyDir sizeLimit | 4Gi | Caps `argocd-application-controller-tmp` |
 | 5GB write to repo-server /tmp | Fails at ~4Gi ("No space left") | sizeLimit enforced by kubelet |
 | 5GB write to controller /tmp | Fails at ~4Gi ("No space left") | Same enforcement mechanism |
-| Pod evicted after disk test | No | Disk usage stayed within volume, no node impact |
-| Pod restarts after disk test | 0 | No eviction = no restart |
-| Pod name changed after test | No (same pod) | Pod was never replaced |
-| Disk pressure events | None | Node disk was never affected |
+| Pod after disk test | Either stays Running OR gets evicted and replaced | Both are correct - see "Two Possible Outcomes" section |
+| Blast radius of eviction | Only the single pod that breached the limit | Other replicas + other components unaffected |
+| New pod /tmp after eviction | Clean, empty, 0% used | emptyDir is wiped on pod replacement (self-healing) |
+| Node-level DiskPressure | Not triggered | Write was contained within the emptyDir volume |
+| Other Argo CD pods affected | No | sizeLimit isolates disk usage per-pod |
 
 ---
 
